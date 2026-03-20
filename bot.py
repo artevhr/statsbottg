@@ -741,13 +741,15 @@ async def cmd_adduser(msg: Message):
         await msg.answer("❌ user_id и channel_id должны быть числами.")
         return
 
+    # Гарантируем запись в channels даже если get_chat недоступен
+    await ensure_channel(channel_id, str(channel_id), None)
     ch_name = str(channel_id)
     try:
         chat = await bot.get_chat(channel_id)
         await ensure_channel(channel_id, chat.title, chat.username)
         ch_name = f"@{chat.username}" if chat.username else chat.title
     except Exception as e:
-        logger.warning(f"get_chat {channel_id}: {e}")
+        logger.warning(f"get_chat {channel_id}: {e} — канал сохранён без названия")
 
     uname = fname = None
     try:
@@ -792,8 +794,8 @@ async def cmd_remove(msg: Message):
             cid  = int(p)
             info = await get_channel_info(cid)
             if not info:
-                results.append(f"⚠️ <code>{cid}</code> — не найден")
-                continue
+                await ensure_channel(cid, str(cid), None)
+                info = await get_channel_info(cid)
             await set_channel_active(cid, False)
             label = f"@{info[2]}" if info[2] else (info[1] or str(cid))
             results.append(f"🔴 <b>{label}</b> — отключён")
@@ -815,8 +817,9 @@ async def cmd_enable(msg: Message):
             cid  = int(p)
             info = await get_channel_info(cid)
             if not info:
-                results.append(f"⚠️ <code>{cid}</code> — не найден")
-                continue
+                # Канал есть в user_channels но не в channels — создаём запись
+                await ensure_channel(cid, str(cid), None)
+                info = await get_channel_info(cid)
             await set_channel_active(cid, True)
             label = f"@{info[2]}" if info[2] else (info[1] or str(cid))
             results.append(f"🟢 <b>{label}</b> — включён")
