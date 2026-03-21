@@ -1,3 +1,4 @@
+# версия v1.4
 #!/usr/bin/env python3
 """
 Channel Analytics Bot
@@ -18,13 +19,14 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    CallbackQuery, FSInputFile,
+    CallbackQuery, FSInputFile, LabeledPrice,
     InlineKeyboardButton, InlineKeyboardMarkup, Message,
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 
 from report_generator import generate_report
+from mediakit_generator import generate_mediakit
 
 load_dotenv()
 
@@ -97,6 +99,13 @@ TRIAL_PLAN = "pro"
 TRIAL_DAYS = 7
 PERIOD_LABELS = {1: "День", 7: "Неделя", 30: "Месяц", 0: "Всё время"}
 
+# Цены в Telegram Stars (1 Star ≈ 0.013 USD)
+STARS_PRICES = {
+    "pro":      {"month": 550,   "year": 4900},
+    "business": {"month": 1200,  "year": 10800},
+    "agency":   {"month": 2400,  "year": 21600},
+}
+
 
 def plan_cfg(plan: str) -> dict:
     return PLANS.get(plan, PLANS["basic"])
@@ -162,6 +171,11 @@ async def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_snap ON snapshots(channel_id, taken_at);
         CREATE INDEX IF NOT EXISTS idx_posts ON posts(channel_id, posted_at);
+        CREATE TABLE IF NOT EXISTS user_settings (
+            user_id         INTEGER PRIMARY KEY,
+            daily_digest    INTEGER DEFAULT 0,
+            created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
         """)
 
         for sql in [
@@ -495,6 +509,38 @@ async def credit_referral_bonus(referred_id: int):
         )
     except Exception:
         pass
+
+
+# ── Настройки пользователя ───────────────────────────────────────────────────
+
+async def get_daily_digest(user_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT daily_digest FROM user_settings WHERE user_id=?", (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+    return bool(row[0]) if row else False
+
+
+async def toggle_daily_digest(user_id: int) -> bool:
+    current = await get_daily_digest(user_id)
+    new_val = 0 if current else 1
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO user_settings (user_id, daily_digest) VALUES (?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET daily_digest=excluded.daily_digest""",
+            (user_id, new_val),
+        )
+        await db.commit()
+    return bool(new_val)
+
+
+async def get_daily_digest_users() -> list:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT user_id FROM user_settings WHERE daily_digest=1"
+        ) as cur:
+            return [r[0] for r in await cur.fetchall()]
 
 
 # ── Снимки / Посты ───────────────────────────────────────────────────────────
@@ -988,7 +1034,8 @@ async def kb_main_menu(user_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📋 Сводный отчёт", callback_data="menu:summary"),
         ])
     rows.append([
-        InlineKeyboardButton(text="❓ Помощь", callback_data="menu:help"),
+        InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu:settings"),
+        InlineKeyboardButton(text="❓ Помощь",    callback_data="menu:help"),
     ])
     if user_id in SUPER_ADMINS:
         rows.append([
@@ -1018,6 +1065,8 @@ async def kb_channel_menu(cid: int, user_id: int) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton(text="🏆 Топ постов",   callback_data=f"top_posts:{cid}:7") if pcfg["top_posts"] else
             InlineKeyboardButton(text="🏆 Топ постов 🔒",callback_data="plan:upgrade:top_posts"),
+            InlineKeyboardButton(text="📄 Медиакит PDF", callback_data=f"mediakit:{cid}") if pcfg["excel"] else
+            InlineKeyboardButton(text="📄 Медиакит 🔒",  callback_data="plan:upgrade:excel"),
         ],
     ]
     if is_owner:
@@ -1094,6 +1143,10 @@ def kb_cabinet(trial_used: bool, plan: str) -> InlineKeyboardMarkup:
             callback_data="plan:trial",
         )])
     rows.append([InlineKeyboardButton(
+        text="⭐ Купить тариф за Telegram Stars",
+        callback_data="stars:menu",
+    )])
+    rows.append([InlineKeyboardButton(
         text="💳 Все тарифы и цены",
         callback_data="menu:plans",
     )])
@@ -1106,6 +1159,26 @@ def kb_cabinet(trial_used: bool, plan: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def kb_stars_menu() -> InlineKeyboardMarkup:
+    rows = []
+    for plan_key in ["pro", "business", "agency"]:
+        pcfg   = plan_cfg(plan_key)
+        pm     = STARS_PRICES[plan_key]["month"]
+        py     = STARS_PRICES[plan_key]["year"]
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{pcfg['emoji']} {pcfg['name']} — {pm}⭐/мес",
+                callback_data=f"stars:buy:{plan_key}:30",
+            ),
+            InlineKeyboardButton(
+                text=f"{py}⭐/год",
+                callback_data=f"stars:buy:{plan_key}:365",
+            ),
+        ])
+    rows.append([InlineKeyboardButton(text="◀ Назад", callback_data="menu:cabinet")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def kb_ch_settings(cid: int, co_admin: bool, is_owner: bool) -> InlineKeyboardMarkup:
     rows = []
     if is_owner:
@@ -1113,6 +1186,14 @@ def kb_ch_settings(cid: int, co_admin: bool, is_owner: bool) -> InlineKeyboardMa
         rows.append([InlineKeyboardButton(text=co_text, callback_data=f"coadmin:{cid}")])
     rows.append([InlineKeyboardButton(text="◀ Назад к каналу", callback_data=f"ch_menu:{cid}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def kb_main_settings(daily_on: bool) -> InlineKeyboardMarkup:
+    daily_text = f"📬 Ежедневная сводка: {'ВКЛ ✅' if daily_on else 'ВЫКЛ ❌'}"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=daily_text, callback_data="settings:toggle_daily")],
+        [InlineKeyboardButton(text="◀ Назад", callback_data="menu:main")],
+    ])
 
 
 def kb_report_periods(cid: int) -> InlineKeyboardMarkup:
@@ -2088,6 +2169,157 @@ async def cb_list_channels_compat(call: CallbackQuery):
     await cb_menu_channels(call)
 
 
+# ── Медиакит ─────────────────────────────────────────────────────────────────
+
+@dp.callback_query(F.data.startswith("mediakit:"))
+async def cb_mediakit(call: CallbackQuery):
+    cid = int(call.data.split(":")[1])
+    if not await has_feature(call.from_user.id, "excel"):
+        await call.answer("🔒 Медиакит доступен с тарифа Про.", show_alert=True)
+        return
+    if not await can_access(call.from_user.id, cid):
+        await call.answer("❌ Нет доступа.", show_alert=True)
+        return
+
+    await call.answer("⏳ Генерирую медиакит...")
+    status = await call.message.answer("⏳ <b>Генерирую медиакит PDF...</b>", parse_mode="HTML")
+
+    info    = await get_channel_info(cid)
+    display = f"@{info[2]}" if info and info[2] else (info[1] if info else str(cid))
+    description = None
+    try:
+        chat = await bot.get_chat(cid)
+        description = getattr(chat, "description", None)
+    except Exception:
+        pass
+
+    tmp_path = None
+    try:
+        tmp_path = await generate_mediakit(
+            db_path=DB_PATH,
+            channel_id=cid,
+            channel_name=display,
+            channel_description=description,
+        )
+        await bot.send_document(
+            chat_id=call.from_user.id,
+            document=FSInputFile(tmp_path),
+            caption=(
+                f"📄 <b>Медиакит — {display}</b>\n"
+                f"<i>Готов к отправке рекламодателям</i>\n"
+                f"<i>🕐 {fmt_msk(datetime.utcnow())} МСК</i>"
+            ),
+            parse_mode="HTML",
+        )
+        await status.edit_text("✅ <b>Медиакит готов!</b>", parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"Mediakit error: {e}", exc_info=True)
+        await status.edit_text("❌ Ошибка при генерации медиакита.", parse_mode="HTML")
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+# ── Настройки ────────────────────────────────────────────────────────────────
+
+@dp.callback_query(F.data == "menu:settings")
+async def cb_menu_settings(call: CallbackQuery):
+    daily_on = await get_daily_digest(call.from_user.id)
+    await call.message.edit_text(
+        "⚙️ <b>Настройки</b>\n\n"
+        "📬 <b>Ежедневная сводка</b> — каждое утро в 09:00 МСК бот присылает "
+        "краткую статистику за вчера по всем вашим каналам.",
+        reply_markup=kb_main_settings(daily_on),
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+
+@dp.callback_query(F.data == "settings:toggle_daily")
+async def cb_toggle_daily(call: CallbackQuery):
+    new_val = await toggle_daily_digest(call.from_user.id)
+    state   = "включена ✅" if new_val else "отключена ❌"
+    await call.answer(f"Ежедневная сводка {state}", show_alert=True)
+    await call.message.edit_text(
+        "⚙️ <b>Настройки</b>\n\n"
+        "📬 <b>Ежедневная сводка</b> — каждое утро в 09:00 МСК бот присылает "
+        "краткую статистику за вчера по всем вашим каналам.",
+        reply_markup=kb_main_settings(new_val),
+        parse_mode="HTML",
+    )
+
+
+# ── Telegram Stars оплата ─────────────────────────────────────────────────────
+
+@dp.callback_query(F.data == "stars:menu")
+async def cb_stars_menu(call: CallbackQuery):
+    await call.message.edit_text(
+        "⭐ <b>Оплата через Telegram Stars</b>\n\n"
+        "Выберите тариф и срок подписки.\n"
+        "Оплата происходит мгновенно прямо в Telegram — без карт и банков.\n\n"
+        "<i>1 месяц = 30 дней · 1 год = 365 дней</i>",
+        reply_markup=kb_stars_menu(),
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+
+@dp.callback_query(F.data.startswith("stars:buy:"))
+async def cb_stars_buy(call: CallbackQuery):
+    parts   = call.data.split(":")
+    plan    = parts[2]
+    days    = int(parts[3])
+    period  = "месяц" if days == 30 else "год"
+    pcfg    = plan_cfg(plan)
+    stars   = STARS_PRICES[plan]["month" if days == 30 else "year"]
+
+    await bot.send_invoice(
+        chat_id=call.from_user.id,
+        title=f"{pcfg['emoji']} {pcfg['name']} — {period}",
+        description=(
+            f"Доступ к тарифу {pcfg['name']} на {days} дней.\n"
+            f"Каналов: {'∞' if pcfg['channels'] > 1000 else pcfg['channels']} · "
+            f"Excel · AI · {'Бизнес-функции' if pcfg.get('ai') else 'Про-функции'}"
+        ),
+        payload=f"{plan}:{days}:{call.from_user.id}",
+        currency="XTR",
+        prices=[LabeledPrice(label=f"{pcfg['name']} {period}", amount=stars)],
+    )
+    await call.answer()
+
+
+@dp.pre_checkout_query()
+async def pre_checkout(query):
+    await bot.answer_pre_checkout_query(query.id, ok=True)
+
+
+@dp.message(F.successful_payment)
+async def successful_payment(msg: Message):
+    payload = msg.successful_payment.invoice_payload
+    parts   = payload.split(":")
+    if len(parts) != 3:
+        return
+
+    plan, days, uid_str = parts
+    user_id = int(uid_str)
+    days    = int(days)
+
+    await set_user_plan(user_id, plan, days)
+    await credit_referral_bonus(user_id)
+
+    pcfg    = plan_cfg(plan)
+    expires = (datetime.utcnow() + timedelta(days=days)).strftime("%d.%m.%Y")
+    period  = "месяц" if days == 30 else "год"
+
+    await msg.answer(
+        f"✅ <b>Оплата прошла!</b>\n\n"
+        f"Тариф {pcfg['emoji']} <b>{pcfg['name']}</b> активирован на {period}.\n"
+        f"Действует до <b>{expires}</b>.\n\n"
+        f"Нажмите /menu чтобы открыть бота.",
+        parse_mode="HTML",
+    )
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SCHEDULER
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2152,6 +2384,64 @@ async def send_expiry_reminders():
             logger.warning(f"Expiry reminder {user_id}: {e}")
 
 
+async def send_daily_digest():
+    """Ежедневная сводка за вчера для пользователей у которых она включена."""
+    user_ids = await get_daily_digest_users()
+    yesterday_start = (datetime.utcnow() - timedelta(days=1)).replace(hour=0, minute=0, second=0).isoformat()
+    yesterday_end   = (datetime.utcnow() - timedelta(days=1)).replace(hour=23, minute=59, second=59).isoformat()
+    yesterday_str   = (datetime.utcnow() - timedelta(days=1)).strftime("%d.%m.%Y")
+
+    for uid in user_ids:
+        channels = await get_user_channels_full(uid)
+        if not channels:
+            continue
+
+        lines = [f"📬 <b>Сводка за {yesterday_str}</b>", ""]
+        for cid, title, uname, *_ in channels:
+            display = f"@{uname}" if uname else (title or str(cid))
+
+            async with aiosqlite.connect(DB_PATH) as db:
+                async with db.execute(
+                    "SELECT members FROM snapshots WHERE channel_id=? AND taken_at>=? ORDER BY taken_at DESC LIMIT 1",
+                    (cid, yesterday_start),
+                ) as cur:
+                    row = await cur.fetchone()
+                    members_end = row[0] if row else None
+
+                async with db.execute(
+                    "SELECT members FROM snapshots WHERE channel_id=? AND taken_at>=? ORDER BY taken_at LIMIT 1",
+                    (cid, yesterday_start),
+                ) as cur:
+                    row = await cur.fetchone()
+                    members_start = row[0] if row else None
+
+                async with db.execute(
+                    "SELECT COUNT(*), SUM(views) FROM posts WHERE channel_id=? AND posted_at>=? AND posted_at<=?",
+                    (cid, yesterday_start, yesterday_end),
+                ) as cur:
+                    row = await cur.fetchone()
+                    posts_cnt  = row[0] or 0
+                    views_sum  = int(row[1] or 0)
+
+            growth = (members_end - members_start) if (members_end and members_start) else None
+            sign   = "+" if (growth or 0) >= 0 else ""
+            arrow  = "📈" if (growth or 0) > 0 else ("📉" if (growth or 0) < 0 else "➡️")
+
+            lines.append(f"<b>{display}</b>")
+            if members_end:
+                lines.append(f"  👥 {members_end:,}  {arrow} {sign}{growth or 0}")
+            lines.append(f"  ✍️ {posts_cnt} постов   👁 {views_sum:,} просм.")
+            lines.append("")
+
+        lines.append(f"<i>⚙️ Отключить: /menu → Настройки</i>")
+
+        try:
+            await bot.send_message(uid, "\n".join(lines), parse_mode="HTML")
+            await asyncio.sleep(0.3)
+        except Exception as e:
+            logger.warning(f"Daily digest {uid}: {e}")
+
+
 async def send_weekly_digest() -> Tuple[int, int]:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
@@ -2198,6 +2488,7 @@ async def main():
     scheduler.add_job(take_snapshots,       "interval", hours=1,        id="hourly")
     scheduler.add_job(send_weekly_digest,   "cron", day_of_week="mon",   hour=9,  id="weekly")
     scheduler.add_job(send_expiry_reminders,"cron", hour=10, minute=0,            id="expiry")
+    scheduler.add_job(send_daily_digest,      "cron", hour=9,  minute=0,            id="daily")
     scheduler.start()
 
     asyncio.create_task(take_snapshots())
