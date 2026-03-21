@@ -1,4 +1,3 @@
-#v3
 #!/usr/bin/env python3
 """
 Channel Analytics Bot
@@ -731,27 +730,33 @@ async def ai_analyze(channel_name: str, s: dict, period_label: str) -> str:
                     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                     "Content-Type": "application/json",
                     "HTTP-Referer": "https://t.me/whanalyticbot",
+                    "X-Title": "WH Analytics Bot",
                 },
                 json={
                     "model": AI_MODEL,
                     "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 500,
+                    "temperature": 0.7,
                 },
             )
+            logger.info(f"OpenRouter status: {resp.status_code}")
             data = resp.json()
+            logger.info(f"OpenRouter response keys: {list(data.keys())}")
+
             if "choices" not in data:
-                err = data.get("error", {})
-                msg = err.get("message", str(data)) if isinstance(err, dict) else str(err)
-                logger.error(f"OpenRouter bad response: {data}")
+                err  = data.get("error", {})
+                msg  = err.get("message", str(data)) if isinstance(err, dict) else str(err)
+                code = err.get("code", "") if isinstance(err, dict) else ""
+                logger.error(f"OpenRouter full response: {data}")
                 return (
-                    f"❌ Ошибка AI: {msg[:200]}\n\n"
-                    f"<i>Проверьте AI_MODEL в настройках.\n"
-                    f"Текущая модель: <code>{AI_MODEL}</code></i>"
+                    f"❌ Ошибка AI ({code}): {msg[:300]}\n\n"
+                    f"<i>Модель: <code>{AI_MODEL}</code>\n"
+                    f"HTTP статус: {resp.status_code}</i>"
                 )
             return data["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        logger.error(f"OpenRouter error: {e}")
-        return f"❌ Ошибка при обращении к AI: {str(e)[:150]}"
+        logger.error(f"OpenRouter exception: {e}", exc_info=True)
+        return f"❌ Ошибка при обращении к AI: {str(e)[:200]}"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
