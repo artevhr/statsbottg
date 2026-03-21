@@ -1,3 +1,4 @@
+#v3
 #!/usr/bin/env python3
 """
 Channel Analytics Bot
@@ -729,6 +730,7 @@ async def ai_analyze(channel_name: str, s: dict, period_label: str) -> str:
                 headers={
                     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                     "Content-Type": "application/json",
+                    "HTTP-Referer": "https://t.me/whanalyticbot",
                 },
                 json={
                     "model": AI_MODEL,
@@ -737,10 +739,19 @@ async def ai_analyze(channel_name: str, s: dict, period_label: str) -> str:
                 },
             )
             data = resp.json()
+            if "choices" not in data:
+                err = data.get("error", {})
+                msg = err.get("message", str(data)) if isinstance(err, dict) else str(err)
+                logger.error(f"OpenRouter bad response: {data}")
+                return (
+                    f"❌ Ошибка AI: {msg[:200]}\n\n"
+                    f"<i>Проверьте AI_MODEL в настройках.\n"
+                    f"Текущая модель: <code>{AI_MODEL}</code></i>"
+                )
             return data["choices"][0]["message"]["content"].strip()
     except Exception as e:
         logger.error(f"OpenRouter error: {e}")
-        return "❌ Ошибка при обращении к AI. Попробуйте позже."
+        return f"❌ Ошибка при обращении к AI: {str(e)[:150]}"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1536,14 +1547,17 @@ async def cb_menu_summary(call: CallbackQuery):
         return
     await call.answer("⏳")
     text = await fmt_summary(call.from_user.id)
-    await call.message.edit_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="🔄 Обновить", callback_data="menu:summary"),
-            InlineKeyboardButton(text="◀ Назад",     callback_data="menu:main"),
-        ]]),
-        parse_mode="HTML",
-    )
+    try:
+        await call.message.edit_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🔄 Обновить", callback_data="menu:summary"),
+                InlineKeyboardButton(text="◀ Назад",     callback_data="menu:main"),
+            ]]),
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass  # message not modified — ignore
 
 
 @dp.callback_query(F.data == "menu:help")
