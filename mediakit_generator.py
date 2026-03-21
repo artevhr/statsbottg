@@ -42,32 +42,33 @@ _FONTS_REGISTERED = False
 _FONT_NORMAL = "Helvetica"
 _FONT_BOLD   = "Helvetica-Bold"
 
+# Ищем шрифты: сначала bundled в папке fonts/, потом системные
+_FONT_SEARCH = [
+    (os.path.join(os.path.dirname(__file__), "fonts", "DejaVuSans.ttf"),
+     os.path.join(os.path.dirname(__file__), "fonts", "DejaVuSans-Bold.ttf")),
+    ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+    ("/app/fonts/DejaVuSans.ttf",
+     "/app/fonts/DejaVuSans-Bold.ttf"),
+]
+
+
 def _ensure_fonts():
     global _FONTS_REGISTERED, _FONT_NORMAL, _FONT_BOLD
     if _FONTS_REGISTERED:
         return _FONT_NORMAL, _FONT_BOLD
 
-    candidates = [
-        ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",      "DejaVu",     False),
-        ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "DejaVuBold", True),
-    ]
-    ok_normal = ok_bold = False
-    for path, name, is_bold in candidates:
-        if os.path.exists(path):
+    for normal_path, bold_path in _FONT_SEARCH:
+        if os.path.exists(normal_path) and os.path.exists(bold_path):
             try:
-                if name not in pdfmetrics.getRegisteredFontNames():
-                    pdfmetrics.registerFont(TTFont(name, path))
-                if is_bold:
-                    _FONT_BOLD   = name
-                    ok_bold      = True
-                else:
-                    _FONT_NORMAL = name
-                    ok_normal    = True
+                if "DejaVu" not in pdfmetrics.getRegisteredFontNames():
+                    pdfmetrics.registerFont(TTFont("DejaVu",     normal_path))
+                    pdfmetrics.registerFont(TTFont("DejaVuBold", bold_path))
+                _FONT_NORMAL = "DejaVu"
+                _FONT_BOLD   = "DejaVuBold"
+                break
             except Exception:
-                pass
-
-    if not ok_bold:
-        _FONT_BOLD = _FONT_NORMAL  # fallback
+                continue
 
     _FONTS_REGISTERED = True
     return _FONT_NORMAL, _FONT_BOLD
