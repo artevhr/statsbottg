@@ -937,7 +937,7 @@ async def fmt_cabinet(user_id: int) -> str:
         f"Засчитано бонусов: <b>{ref_stats['credited']}</b>",
         f"Бонусных дней получено: <b>{ref_stats['bonus_days']}</b>",
         "",
-        "За каждого приглашённого кто активирует подписку — <b>+10 дней</b> к вашему тарифу.",
+        "За каждого приглашённого кто <b>оплатит</b> любой тариф — <b>+10 дней</b> к вашему тарифу.",
         "",
         f"Ваша ссылка: <code>{ref_link}</code>",
         "━━━━━━━━━━━━━━━━━",
@@ -1385,6 +1385,9 @@ async def cmd_setplan(msg: Message):
         return
 
     await set_user_plan(user_id, plan, days)
+    # Начислить реферальный бонус — только при реальной оплате (не за пробник)
+    if plan != "basic":
+        await credit_referral_bonus(user_id)
     cfg     = plan_cfg(plan)
     expires = (datetime.utcnow() + timedelta(days=days)).strftime("%d.%m.%Y")
     await msg.answer(
@@ -1596,8 +1599,6 @@ async def cb_plan_trial(call: CallbackQuery):
     if not ok:
         await call.answer("Пробный период уже был использован.", show_alert=True)
         return
-    # Начислить реферальный бонус если пользователь пришёл по ссылке
-    await credit_referral_bonus(user_id)
     cfg     = plan_cfg(TRIAL_PLAN)
     expires = (datetime.utcnow() + timedelta(days=TRIAL_DAYS)).strftime("%d.%m.%Y")
     await call.answer(f"🎁 Тариф {cfg['name']} активирован до {expires}!", show_alert=True)
