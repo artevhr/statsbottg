@@ -62,7 +62,7 @@ PLANS = {
     "basic": {
         "name": "Базовый", "emoji": "🔹",
         "channels": 1,
-        "price_month": 299, "price_year": 2870,
+        "price_month": 0, "price_year": 0,
         "periods": [1, 7, 30],
         "excel": False, "coadmin": False, "compare": False,
         "ai": False, "summary": False, "top_posts": False,
